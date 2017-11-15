@@ -1,0 +1,75 @@
+#!/bin/bash
+#
+# Description
+
+declare -i nodes
+declare -a workers
+declare -i ip
+nodes=$1
+
+# Start Master
+echo "starting master"
+docker run -d -it \
+--name master \
+--hostname master \
+--network cluster --ip 200.0.0.10 \
+--env MASTER=true \
+hadoop-cluster
+
+# Get list of workers
+for i in $(seq 1 $nodes) ; do
+    workers+="worker$i "
+done
+
+# Start workers
+ip=11
+for worker in $workers ; do
+    echo "starting $worker"
+    docker run -d -it \
+    --name $worker \
+    --hostname $worker \
+    --network cluster --ip 200.0.0.$ip \
+    hadoop-cluster
+    ip+=1
+done
+
+# Write hosts and slaves file for containers
+cp scripts/hosts.bak scripts/hosts
+rm -f scripts/slaves
+touch scripts/slaves
+ip=11
+echo "200.0.0.10      master" >> scripts/hosts
+for worker in $workers ; do
+    echo "200.0.0.$ip      $worker" >> scripts/hosts
+    echo "$worker" >> scripts/slaves
+    ip+=1
+done
+
+# Copy files into containers, also start SSD daemon and exchange keys
+docker cp scripts/hosts master:/init/hosts
+docker exec -it master cp /init/hosts /etc/hosts
+docker cp scripts/slaves master:/opt/hadoop/hadoop-2.8.1/etc/hadoop/slaves
+docker cp scripts/slaves master:/opt/spark/conf/slaves
+docker exec -it master /sbin/sshd >> /dev/null
+for worker in $workers ; do
+    docker cp scripts/hosts $worker:/init/hosts
+    docker exec -it $worker cp /init/hosts /etc/hosts
+    docker cp scripts/slaves $worker:/opt/hadoop/hadoop-2.8.1/etc/hadoop/slaves
+    docker cp scripts/slaves $worker:/opt/spark/conf/slaves
+    docker exec -it $worker ssh-copy-id -f master >> /dev/null
+    docker exec -it $worker /sbin/sshd >> /dev/null
+done
+for worker in $workers ; do
+    docker exec -it master ssh-copy-id -f $worker >> /dev/null
+done
+
+# Start up hadoop
+echo "formatting Namenode"
+docker exec -it master hdfs namenode -format >> /dev/null
+echo "starting DFS"
+docker exec -it master start-dfs.sh
+docker exec -it master start-yarn.sh
+docker exec -it master /opt/spark/sbin/start-all.sh
+
+exit
+#docker network create --subnet=200.0.0.0/16 cluster
